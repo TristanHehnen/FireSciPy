@@ -6,3 +6,4 @@ from .reader import read_instrument_file, detect_file_type, SUPPORTED_TYPES
 from .netzsch_sta import read_netzsch_sta_file
 from .deatak_mcc import read_deatak_mcc_file
 from .netzsch_cone import read_netzsch_cone_file
+from .mettler_toledo_sta import read_mettler_toledo_sta_file

@@ -8,6 +8,7 @@ from .base import InstrumentFile
 from .netzsch_sta import read_netzsch_sta_file
 from .deatak_mcc import read_deatak_mcc_file
 from .netzsch_cone import read_netzsch_cone_file
+from .mettler_toledo_sta import read_mettler_toledo_sta_file
 
 # Central registry: maps a human-readable instrument name to its parser function.
 # To add support for a new instrument, add a new entry here and provide
@@ -16,6 +17,7 @@ FILE_TYPE_PARSERS = {
     "Netzsch STA": read_netzsch_sta_file,
     "Deatak MCC": read_deatak_mcc_file,
     "Netzsch Cone": read_netzsch_cone_file,
+    "Mettler Toledo STA": read_mettler_toledo_sta_file,
 }
 
 # Convenience list of all supported instrument names, derived from the registry.
@@ -45,6 +47,16 @@ def detect_file_type(file_path):
     # Netzsch Cone Calorimeter exports always start with "General information".
     if first_line.startswith("General information"):
         return "Netzsch Cone"
+
+    # Mettler Toledo STA exports: first non-blank line starts with "Index",
+    # second non-blank line starts with "[#]" (unit for the index column).
+    non_blank = [l.strip() for l in f.lines if l.strip()]
+    if (
+        len(non_blank) >= 2
+        and non_blank[0].startswith("Index")
+        and non_blank[1].startswith("[#]")
+    ):
+        return "Mettler Toledo STA"
 
     # DEATAK MCC exports do not have a fixed first line, but always contain
     # a line with only "@" that separates metadata from measurement data.

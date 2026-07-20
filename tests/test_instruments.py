@@ -20,6 +20,7 @@ from firescipy.instruments import (
     read_deatak_mcc_file,
     read_netzsch_sta_file,
     read_netzsch_cone_file,
+    read_mettler_toledo_sta_file,
     SUPPORTED_TYPES,
 )
 
@@ -34,6 +35,7 @@ def test_supported_types_contains_all_instruments():
     assert "Netzsch STA" in SUPPORTED_TYPES
     assert "Deatak MCC" in SUPPORTED_TYPES
     assert "Netzsch Cone" in SUPPORTED_TYPES
+    assert "Mettler Toledo STA" in SUPPORTED_TYPES
 
 
 # ---------------------------------------------------------------------------
@@ -52,6 +54,10 @@ def test_detect_netzsch_cone():
     assert detect_file_type(FIXTURES / "Netzsch_Cone.csv") == "Netzsch Cone"
 
 
+def test_detect_mettler_toledo_sta():
+    assert detect_file_type(FIXTURES / "Mettler_Toledo_DSC3+.txt") == "Mettler Toledo STA"
+
+
 # ---------------------------------------------------------------------------
 # Generic reader — auto-detection path
 # ---------------------------------------------------------------------------
@@ -61,6 +67,7 @@ def test_read_instrument_file_returns_correct_type():
         ("Netzsch_STA.csv", "Netzsch STA"),
         ("Deatak_MCC.txt", "Deatak MCC"),
         ("Netzsch_Cone.csv", "Netzsch Cone"),
+        ("Mettler_Toledo_DSC3+.txt", "Mettler Toledo STA"),
     ]:
         file_type, _, _ = read_instrument_file(FIXTURES / fname)
         assert file_type == expected_type
@@ -179,3 +186,36 @@ class TestNetzschCone:
 
     def test_encoding_is_latin1(self):
         assert self.meta["USED_ENCODING"] == "latin-1"
+
+
+# ---------------------------------------------------------------------------
+# Mettler Toledo STA parser
+# ---------------------------------------------------------------------------
+
+class TestMettlerToledoSTA:
+    def setup_method(self):
+        self.meta, self.df = read_mettler_toledo_sta_file(
+            FIXTURES / "Mettler_Toledo_DSC3+.txt"
+        )
+
+    def test_dataframe_shape(self):
+        assert self.df.shape == (10, 5)
+
+    def test_dataframe_columns(self):
+        assert list(self.df.columns) == ["Index", "Ts", "t", "Weight", "Tr"]
+
+    def test_numeric_data(self):
+        assert self.df.dtypes["Ts"] == "float64"
+        assert self.df.iloc[0]["Ts"] == pytest.approx(30.6123, rel=1e-4)
+        assert self.df.iloc[0]["Weight"] == pytest.approx(0.999916, rel=1e-4)
+
+    def test_units_in_metadata(self):
+        units = self.meta["UNITS"]
+        assert units["Index"] == "#"
+        assert units["Ts"] == "°C"
+        assert units["t"] == "s"
+        assert units["Weight"] == "mg"
+        assert units["Tr"] == "°C"
+
+    def test_used_encoding_present(self):
+        assert "USED_ENCODING" in self.meta
