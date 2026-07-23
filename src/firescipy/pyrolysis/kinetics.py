@@ -10,7 +10,7 @@ import pandas as pd
 
 from scipy.integrate import trapezoid, cumulative_trapezoid
 from scipy.interpolate import interp1d
-from scipy.optimize import curve_fit, minimize
+from scipy.optimize import curve_fit, minimize, minimize_scalar
 from typing import List, Dict, Union  # for type hints in functions
 from firescipy.utils import series_to_numpy, ensure_nested_dict, get_nested_value, linear_model, calculate_residuals, calculate_R_squared, calculate_RMSE
 from firescipy.constants import GAS_CONSTANT
@@ -1030,6 +1030,191 @@ def compute_Ea_KAS(database, data_keys=["experiments", "TGA", "constant_heating_
 
     # Collect results.
     store_Ea["Ea_results_KAS"] = Ea_results
+
+
+def Ea_Vyazovkin_J2(t_segments, T_segments, E_bounds=(1e3, 1e6)):
+    """
+    Vyazovkin advanced isoconversional method (J2) for one conversion level.
+
+    Finds the activation energy :math:`E_\\alpha` by minimizing the objective
+    function :math:`\\Phi(E_\\alpha)` over all pairs of experiments:
+
+    .. math::
+
+        \\Phi(E_\\alpha) = \\sum_{i=1}^{n} \\sum_{j \\neq i}
+        \\frac{J[E_\\alpha, T_i(t_\\alpha)]}{J[E_\\alpha, T_j(t_\\alpha)]}
+
+    where the time integral over the conversion segment is:
+
+    .. math::
+
+        J[E_\\alpha, T_i(t_\\alpha)] =
+        \\int_{t_{\\alpha - \\Delta\\alpha}}^{t_\\alpha}
+        \\exp\\!\\left(\\frac{-E_\\alpha}{R\\,T_i(t)}\\right) dt
+
+    Formulas 3.13 and 3.16 in: Vyazovkin et al. (2011). ICTAC Kinetics
+    Committee recommendations for performing kinetic computations on thermal
+    analysis data. *Thermochimica Acta*, 520(1–2), 1–19.
+    https://doi.org/10.1016/j.tca.2011.03.034
+
+    See also: Vyazovkin (2000). Modification of the integral isoconversional
+    method to account for variation in the activation energy.
+    *J. Comput. Chem.*, 22(2), 178–183.
+    https://doi.org/10.1002/1096-987X(20010130)22:2<178::AID-JCC5>3.0.CO;2-#
+
+    Parameters
+    ----------
+    t_segments : list of ndarray
+        Time arrays (in seconds) for each experiment over the current
+        conversion segment :math:`[\\alpha - \\Delta\\alpha,\\, \\alpha]`.
+        One array per experiment.
+    T_segments : list of ndarray
+        Temperature arrays (in Kelvin) corresponding to each ``t_segments``
+        entry.
+    E_bounds : tuple of float
+        Lower and upper search bounds for :math:`E_\\alpha` in J/mol.
+        Default is ``(1e3, 1e6)``.
+
+    Returns
+    -------
+    Ea_i : float
+        Activation energy in J/mol at this conversion level.
+    phi_min : float
+        Minimum value of :math:`\\Phi` (goodness-of-minimization indicator).
+    """
+
+    n = len(t_segments)
+
+    if len(T_segments) != n:
+        raise ValueError("t_segments and T_segments must have the same length.")
+    if n < 2:
+        raise ValueError("At least two experiments are required.")
+
+    def phi(E):
+        J = [trapezoid(np.exp(-E / (GAS_CONSTANT * T)), t)
+             for t, T in zip(t_segments, T_segments)]
+        return sum(J[i] / J[j] for i in range(n) for j in range(n) if i != j)
+
+    result = minimize_scalar(phi, bounds=E_bounds, method='bounded')
+    return result.x, result.fun
+
+
+def compute_Ea_Vyazovkin_J2(database, data_keys=["experiments", "TGA", "constant_heating_rate"], E_bounds=(1e3, 1e6)):
+    """
+    Wrapper to compute activation energies using the Vyazovkin advanced
+    isoconversional method (J2) across all conversion levels.
+
+    This function applies :func:`Ea_Vyazovkin_J2` to each conversion level
+    defined by :func:`compute_conversion_levels`. For each level, it extracts
+    the measured :math:`T(t)` segment between consecutive conversion values
+    from the full :func:`compute_conversion` data and minimizes :math:`\\Phi`.
+
+    Requires both :func:`compute_conversion` and
+    :func:`compute_conversion_levels` to have been called beforehand.
+
+    Parameters
+    ----------
+    database : dict
+        The main data structure storing all experimental data.
+        Must follow the format initialized by
+        :func:`initialize_investigation_skeleton`.
+    data_keys : list
+        Keys defining the path to the dataset inside the database.
+        For example: ``["experiments", "TGA", "constant_heating_rate"]``.
+    E_bounds : tuple of float
+        Lower and upper search bounds for :math:`E_\\alpha` in J/mol
+        passed to :func:`Ea_Vyazovkin_J2`. Default is ``(1e3, 1e6)``.
+
+    Returns
+    -------
+    None
+        Adds a DataFrame named ``Ea_results_Vyazovkin_J2`` to the parent
+        location in the database. The DataFrame contains:
+
+        - ``Conversion``: Conversion level :math:`\\alpha`
+        - ``Ea``: Activation energy in J/mol
+        - ``Phi_min``: Minimum value of :math:`\\Phi` at each level
+    """
+
+    dataset = get_nested_value(database, data_keys)
+    if dataset is None:
+        raise ValueError(f"Dataset not found at the specified keys: {data_keys}")
+
+    store_Ea = get_nested_value(database, data_keys[:-1])
+    if store_Ea is None:
+        raise ValueError(f"Unable to store results; parent keys not found: {data_keys[:-1]}")
+
+    set_value_keys = sorted(dataset.keys(), key=lambda x: dataset[x]["set_value"]["value"])
+
+    # Validate required data is present
+    for key in set_value_keys:
+        if "conversion" not in dataset[key]:
+            raise KeyError(
+                f"Full conversion data missing for condition '{key}'. "
+                "Run compute_conversion first.")
+        if "conversion_fractions" not in dataset[key]:
+            raise KeyError(
+                f"Conversion fractions missing for condition '{key}'. "
+                "Run compute_conversion_levels first.")
+
+    # Pre-load full T(t) and alpha data for each experiment
+    conv_time = {}
+    conv_temp = {}
+    for key in set_value_keys:
+        conv = dataset[key]["conversion"]
+        conv_time[key] = conv["Time"].to_numpy()
+        conv_temp[key] = conv["Temperature_Avg"].to_numpy()
+
+    # Pre-load segment boundary times from conversion_fractions
+    frac_time = {}
+    for key in set_value_keys:
+        frac_time[key] = dataset[key]["conversion_fractions"]["Time"].to_numpy()
+
+    alpha_levels = dataset[set_value_keys[0]]["conversion_fractions"]["Alpha"].to_numpy()
+
+    Ea_list = []
+    phi_min_list = []
+
+    for k, alpha_k in enumerate(alpha_levels):
+        t_segments = []
+        T_segments = []
+
+        for key in set_value_keys:
+            t_full = conv_time[key]
+            T_full = conv_temp[key]
+
+            t_upper = frac_time[key][k]
+            t_lower = frac_time[key][k - 1] if k > 0 else t_full[0]
+
+            # Extract all data points within the segment
+            mask = (t_full >= t_lower) & (t_full <= t_upper)
+            t_seg = t_full[mask].copy()
+            T_seg = T_full[mask].copy()
+
+            # Ensure lower endpoint is present
+            if len(t_seg) == 0 or t_seg[0] > t_lower:
+                t_seg = np.concatenate([[t_lower], t_seg])
+                T_seg = np.concatenate([[np.interp(t_lower, t_full, T_full)], T_seg])
+
+            # Ensure upper endpoint is present
+            if t_seg[-1] < t_upper:
+                t_seg = np.concatenate([t_seg, [t_upper]])
+                T_seg = np.concatenate([T_seg, [np.interp(t_upper, t_full, T_full)]])
+
+            t_segments.append(t_seg)
+            T_segments.append(T_seg)
+
+        Ea_i, phi_i = Ea_Vyazovkin_J2(t_segments, T_segments, E_bounds)
+        Ea_list.append(Ea_i)
+        phi_min_list.append(phi_i)
+
+    Ea_results = pd.DataFrame({
+        "Conversion": alpha_levels,
+        "Ea": np.array(Ea_list),
+        "Phi_min": np.array(phi_min_list)
+    })
+
+    store_Ea["Ea_results_Vyazovkin_J2"] = Ea_results
 
 
 def exp_difference(offset, temp_x1, temp_x2, data_y1, data_y2):

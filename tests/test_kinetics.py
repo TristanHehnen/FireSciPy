@@ -18,6 +18,8 @@ from firescipy.pyrolysis.kinetics import (
     initialize_investigation_skeleton,
     compute_conversion_levels,
     compute_Ea_Friedman,
+    compute_Ea_KAS,
+    compute_Ea_Vyazovkin_J2,
 )
 from firescipy.pyrolysis.modeling import (
     create_linear_temp_program,
@@ -35,6 +37,8 @@ _ALPHA0 = 1e-12     # small non-zero start value to avoid division by zero
 _T_START = 300      # K
 _T_END = 750        # K
 _N_POINTS = 451     # temperature resolution: ΔT ≈ 1 K
+_CONVERSION_LEVELS = np.linspace(0.05, 0.95, 37)
+_HEATING_RATES = {"2Kmin": 2, "5Kmin": 5, "10Kmin": 10, "20Kmin": 20, "40Kmin": 40}
 
 
 # ---------------------------------------------------------------------------
@@ -85,6 +89,44 @@ def _build_friedman_data_structure(heating_rates):
     return data_structure
 
 
+def _build_integral_data_structure(heating_rates):
+    """Build a data structure with modelled integral data for KAS and J2 testing.
+
+    Populates ``conversion`` with the full simulated T(t) and alpha(t) arrays,
+    bypassing the raw-data pipeline. ``compute_conversion_levels`` must be
+    called separately before running the Ea methods.
+    """
+    data_structure = initialize_investigation_skeleton(
+        material="Test material",
+        signal={"name": "Mass", "unit": "mg"})
+
+    for hr_label, beta in heating_rates.items():
+        hr_model = create_linear_temp_program(
+            start_temp=_T_START, end_temp=_T_END,
+            beta=beta, beta_unit="K/min", steps=_N_POINTS)
+
+        t_array = hr_model["Time"]
+        T_array = hr_model["Temperature"]
+
+        t_sol, alpha_sol = solve_kinetics(
+            t_array=t_array, T_array=T_array,
+            A=_A, E=_E, alpha0=_ALPHA0,
+            R=GAS_CONSTANT, reaction_model='nth_order',
+            model_params={'n': 1.0})
+
+        hr_entry = ensure_nested_dict(
+            data_structure,
+            ["experiments", "TGA", "constant_heating_rate", hr_label])
+        hr_entry["set_value"] = {"value": beta, "unit": "K/min"}
+        hr_entry["data_type"] = "integral"
+        hr_entry["conversion"] = pd.DataFrame({
+            "Time": t_sol,
+            "Temperature_Avg": T_array,
+            "Alpha": alpha_sol})
+
+    return data_structure
+
+
 # ---------------------------------------------------------------------------
 # Friedman method tests
 # ---------------------------------------------------------------------------
@@ -121,3 +163,39 @@ def test_compute_Ea_Friedman_raises_for_integral_data():
 
     with pytest.raises(ValueError, match="integral"):
         compute_Ea_Friedman(data_structure)
+
+
+# ---------------------------------------------------------------------------
+# KAS method tests
+# ---------------------------------------------------------------------------
+
+def test_compute_Ea_KAS_recovers_known_Ea():
+    """KAS round-trip: modelled data with known Ea must be recovered within 1%."""
+    data_structure = _build_integral_data_structure(_HEATING_RATES)
+    compute_conversion_levels(data_structure, desired_levels=_CONVERSION_LEVELS)
+    compute_Ea_KAS(data_structure)
+
+    Ea_recovered = data_structure["experiments"]["TGA"]["Ea_results_KAS"]["Ea"].values
+
+    assert np.allclose(Ea_recovered, _E, rtol=0.01), (
+        f"KAS Ea deviated more than 1% from input: "
+        f"mean={np.mean(Ea_recovered) / 1000:.2f} kJ/mol, "
+        f"expected={_E / 1000:.2f} kJ/mol")
+
+
+# ---------------------------------------------------------------------------
+# Vyazovkin J2 method tests
+# ---------------------------------------------------------------------------
+
+def test_compute_Ea_Vyazovkin_J2_recovers_known_Ea():
+    """Vyazovkin J2 round-trip: modelled data with known Ea must be recovered within 2%."""
+    data_structure = _build_integral_data_structure(_HEATING_RATES)
+    compute_conversion_levels(data_structure, desired_levels=_CONVERSION_LEVELS)
+    compute_Ea_Vyazovkin_J2(data_structure)
+
+    Ea_recovered = data_structure["experiments"]["TGA"]["Ea_results_Vyazovkin_J2"]["Ea"].values
+
+    assert np.allclose(Ea_recovered, _E, rtol=0.02), (
+        f"Vyazovkin J2 Ea deviated more than 2% from input: "
+        f"mean={np.mean(Ea_recovered) / 1000:.2f} kJ/mol, "
+        f"expected={_E / 1000:.2f} kJ/mol")
